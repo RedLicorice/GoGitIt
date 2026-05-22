@@ -1,0 +1,28 @@
+# Build artifacts
+/bin/
+/web/dist/*
+!/web/dist/.gitkeep
+/web/node_modules/
+
+# Data
+/data/
+
+# Local config
+/config.yaml
+.env
+.env.local
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Claude Code — keep shared settings.json, ignore per-user overrides
+.claude/settings.local.json
+.claude/.credentials.json

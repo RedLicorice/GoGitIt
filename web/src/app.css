@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #app {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Custom scrollbar — GitHub-like */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium
+           border border-border bg-canvas-subtle text-fg
+           hover:bg-border-muted transition-colors
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply border-success-emphasis bg-success-emphasis text-white
+           hover:bg-success hover:border-success;
+  }
+  .btn-danger {
+    @apply border-danger-emphasis bg-danger-emphasis text-white
+           hover:bg-danger hover:border-danger;
+  }
+  .input {
+    @apply w-full px-3 py-1.5 rounded-md text-sm
+           bg-canvas-inset border border-border text-fg
+           focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent;
+  }
+  /* Compact action button for inline file-row controls. */
+  .btn-mini {
+    @apply px-1.5 py-0.5 rounded text-xs font-medium
+           border border-border bg-canvas-subtle text-fg-muted
+           hover:text-fg hover:bg-border-muted transition-colors
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+}

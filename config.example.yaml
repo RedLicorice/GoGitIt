@@ -1,0 +1,42 @@
+# GoGitIt configuration.
+# Copy to config.yaml and adjust. Environment variables (GOGITIT_*) override.
+
+server:
+  # Bind all interfaces (reachable over Tailscale/LAN). Use "127.0.0.1:8080"
+  # to restrict to localhost.
+  addr: "0.0.0.0:8080"
+
+storage:
+  # Where managed repos live (used mostly in server mode).
+  repos_dir: "./data/repos"
+  # Where the registry JSON and other state are persisted.
+  state_dir: "./data/state"
+
+# ---- LOCAL MODE ----------------------------------------------------------
+# Default: no authentication, single local user. Just `go run` and use.
+auth:
+  enabled: false
+
+# ---- SERVER MODE (Keycloak) ---------------------------------------------
+# Uncomment and configure when deploying to gogitit.example.com.
+#
+# auth:
+#   enabled: true
+#   issuer: "https://auth.example.com/realms/myrealm"
+#   client_id: "gogitit"
+#   client_secret: "REDACTED"  # better: set via GOGITIT_AUTH_CLIENT_SECRET
+#   redirect_url: "https://gogitit.example.com/auth/callback"
+#   scopes: ["openid", "profile", "email"]
+#   cookie_domain: "gogitit.example.com"
+#   cookie_secure: true
+
+cors:
+  # Vite dev server. Add production origins when needed.
+  allowed_origins:
+    - "http://localhost:5173"
+
+# GitHub CLI integration. When enabled, GoGitIt detects a `gh` login and can
+# reuse it for GitHub authentication. Works in local and server mode. Set false
+# (or GOGITIT_GH_ENABLED=false) to disable globally.
+gh:
+  enabled: true
