@@ -298,6 +298,15 @@
     if (s === '?') return 'text-attention';
     return 'text-accent';
   }
+
+  // Glyph paths for the per-file action buttons (16×16, stroked).
+  const ICON = {
+    stage: 'M8 3.5v9M3.5 8h9', // plus
+    unstage: 'M3.5 8h9', // minus
+    discard:
+      'M2.75 4.5h10.5M6 4.5V3h4v1.5M4.5 4.5l.55 8.2a1 1 0 0 0 1 .93h3.9' +
+      'a1 1 0 0 0 1-.93l.55-8.2M6.5 7.25v4M9.5 7.25v4', // trash
+  };
 </script>
 
 <div class="h-full flex">
@@ -308,7 +317,17 @@
   >
     <div class="px-3 py-2 border-b border-border flex items-center justify-between">
       <span class="text-xs uppercase tracking-wider text-fg-muted font-semibold">Changes</span>
-      <button class="text-xs text-fg-muted hover:text-fg" on:click={load}>Refresh</button>
+      <button
+        class="inline-flex items-center gap-1 text-xs text-accent hover:opacity-80 transition-opacity"
+        on:click={load}
+      >
+        <svg viewBox="0 0 16 16" class="w-3.5 h-3.5" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1"/>
+          <path d="M12 1.5V4.5H9"/>
+        </svg>
+        Refresh
+      </button>
     </div>
 
     {#if opError}
@@ -327,10 +346,17 @@
           <div class="px-3 pt-3 pb-1 flex items-center justify-between">
             <span class="text-xs text-fg-muted uppercase tracking-wider">Staged</span>
             <button
-              class="text-xs text-fg-muted hover:text-fg disabled:opacity-40"
+              class="inline-flex items-center gap-1 text-xs text-accent hover:opacity-80
+                     transition-opacity disabled:opacity-40"
               disabled={working}
               on:click={() => runOp('unstage', status.staged.map((f) => f.path))}
-            >Unstage all</button>
+            >
+              <svg viewBox="0 0 16 16" class="w-3.5 h-3.5" fill="none" stroke="currentColor"
+                   stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                <path d={ICON.unstage}/>
+              </svg>
+              Unstage all
+            </button>
           </div>
           <ul>
             {#each status.staged as f (f.path)}
@@ -346,10 +372,21 @@
                   <span class="font-mono text-xs {statusColor(f.status)}">{f.status}</span>
                   <span class="truncate text-sm">{f.path}</span>
                 </button>
-                <div class="flex items-center gap-1 pr-2 shrink-0
+                <div class="flex items-center gap-0.5 pr-1.5 shrink-0
                             opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button class="btn-mini" disabled={working}
-                          on:click={() => runOp('unstage', [f.path])}>Unstage</button>
+                  <button
+                    class="p-1 rounded text-fg-muted hover:text-fg hover:bg-border-muted
+                           transition-colors disabled:opacity-40"
+                    disabled={working}
+                    title="Unstage"
+                    aria-label="Unstage"
+                    on:click={() => runOp('unstage', [f.path])}
+                  >
+                    <svg viewBox="0 0 16 16" class="w-4 h-4" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                      <path d={ICON.unstage}/>
+                    </svg>
+                  </button>
                 </div>
               </li>
             {/each}
@@ -360,10 +397,17 @@
           <div class="px-3 pt-3 pb-1 flex items-center justify-between">
             <span class="text-xs text-fg-muted uppercase tracking-wider">Unstaged</span>
             <button
-              class="text-xs text-fg-muted hover:text-fg disabled:opacity-40"
+              class="inline-flex items-center gap-1 text-xs text-accent hover:opacity-80
+                     transition-opacity disabled:opacity-40"
               disabled={working}
               on:click={() => runOp('stage', status.unstaged.map((f) => f.path))}
-            >Stage all</button>
+            >
+              <svg viewBox="0 0 16 16" class="w-3.5 h-3.5" fill="none" stroke="currentColor"
+                   stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                <path d={ICON.stage}/>
+              </svg>
+              Stage all
+            </button>
           </div>
           <ul>
             {#each status.unstaged as f (f.path)}
@@ -379,12 +423,34 @@
                   <span class="font-mono text-xs {statusColor(f.status)}">{f.status}</span>
                   <span class="truncate text-sm">{f.path}</span>
                 </button>
-                <div class="flex items-center gap-1 pr-2 shrink-0
+                <div class="flex items-center gap-0.5 pr-1.5 shrink-0
                             opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button class="btn-mini" disabled={working}
-                          on:click={() => runOp('stage', [f.path])}>Stage</button>
-                  <button class="btn-mini hover:!text-danger" disabled={working}
-                          on:click={() => confirmDiscard([f.path])}>Discard</button>
+                  <button
+                    class="p-1 rounded text-fg-muted hover:text-fg hover:bg-border-muted
+                           transition-colors disabled:opacity-40"
+                    disabled={working}
+                    title="Stage"
+                    aria-label="Stage"
+                    on:click={() => runOp('stage', [f.path])}
+                  >
+                    <svg viewBox="0 0 16 16" class="w-4 h-4" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                      <path d={ICON.stage}/>
+                    </svg>
+                  </button>
+                  <button
+                    class="p-1 rounded text-fg-muted hover:text-danger hover:bg-border-muted
+                           transition-colors disabled:opacity-40"
+                    disabled={working}
+                    title="Discard"
+                    aria-label="Discard"
+                    on:click={() => confirmDiscard([f.path])}
+                  >
+                    <svg viewBox="0 0 16 16" class="w-4 h-4" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d={ICON.discard}/>
+                    </svg>
+                  </button>
                 </div>
               </li>
             {/each}
@@ -395,10 +461,17 @@
           <div class="px-3 pt-3 pb-1 flex items-center justify-between">
             <span class="text-xs text-fg-muted uppercase tracking-wider">Untracked</span>
             <button
-              class="text-xs text-fg-muted hover:text-fg disabled:opacity-40"
+              class="inline-flex items-center gap-1 text-xs text-accent hover:opacity-80
+                     transition-opacity disabled:opacity-40"
               disabled={working}
               on:click={() => runOp('stage', [...status.untracked])}
-            >Stage all</button>
+            >
+              <svg viewBox="0 0 16 16" class="w-3.5 h-3.5" fill="none" stroke="currentColor"
+                   stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                <path d={ICON.stage}/>
+              </svg>
+              Stage all
+            </button>
           </div>
           <ul>
             {#each status.untracked as p (p)}
@@ -414,12 +487,34 @@
                   <span class="font-mono text-xs text-attention">?</span>
                   <span class="truncate text-sm">{p}</span>
                 </button>
-                <div class="flex items-center gap-1 pr-2 shrink-0
+                <div class="flex items-center gap-0.5 pr-1.5 shrink-0
                             opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button class="btn-mini" disabled={working}
-                          on:click={() => runOp('stage', [p])}>Stage</button>
-                  <button class="btn-mini hover:!text-danger" disabled={working}
-                          on:click={() => confirmDiscard([p])}>Discard</button>
+                  <button
+                    class="p-1 rounded text-fg-muted hover:text-fg hover:bg-border-muted
+                           transition-colors disabled:opacity-40"
+                    disabled={working}
+                    title="Stage"
+                    aria-label="Stage"
+                    on:click={() => runOp('stage', [p])}
+                  >
+                    <svg viewBox="0 0 16 16" class="w-4 h-4" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+                      <path d={ICON.stage}/>
+                    </svg>
+                  </button>
+                  <button
+                    class="p-1 rounded text-fg-muted hover:text-danger hover:bg-border-muted
+                           transition-colors disabled:opacity-40"
+                    disabled={working}
+                    title="Discard"
+                    aria-label="Discard"
+                    on:click={() => confirmDiscard([p])}
+                  >
+                    <svg viewBox="0 0 16 16" class="w-4 h-4" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d={ICON.discard}/>
+                    </svg>
+                  </button>
                 </div>
               </li>
             {/each}

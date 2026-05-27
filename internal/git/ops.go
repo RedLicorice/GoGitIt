@@ -2,20 +2,68 @@ package git
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/RedLicorice/GoGitIt/internal/gitext"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 )
 
+// lfsDefaultThresholdBytes is the auto-track size cutoff when the user hasn't
+// configured one — git's own server-side warning threshold is 100 MB.
+const lfsDefaultThresholdBytes int64 = 100 * 1024 * 1024
+
 // Index- and worktree-mutating operations. These shell out to the system git
 // binary via internal/gitext: go-git's worktree/index code mishandles
 // core.fileMode, .gitignore and untracked files and is not atomic. go-git is
 // kept for object-database reads (log, diff, graph) where it is reliable.
 
-// Stage adds the given paths to the index.
+// Stage adds the given paths to the index. When the repo has LFS
+// auto-tracking enabled (gogitit.lfs.enabled), files over the configured
+// threshold are git-lfs tracked first so they land as pointers, not blobs.
 func Stage(repo *gogit.Repository, paths []string) error {
-	return gitext.Stage(worktreeRoot(repo), paths)
+	root := worktreeRoot(repo)
+	if enabled, threshold := lfsAutoConfig(root); enabled && threshold > 0 {
+		if lfsTrackOversize(root, paths, threshold) {
+			// .gitattributes must be staged so the new pattern is committed.
+			paths = append([]string{".gitattributes"}, paths...)
+		}
+	}
+	return gitext.Stage(root, paths)
+}
+
+// lfsAutoConfig reads the per-repo LFS auto-tracking settings.
+func lfsAutoConfig(root string) (enabled bool, threshold int64) {
+	threshold = lfsDefaultThresholdBytes
+	v, _ := gitext.ConfigGet(root, "gogitit.lfs.enabled")
+	if !strings.EqualFold(v, "true") {
+		return false, threshold
+	}
+	if vt, _ := gitext.ConfigGet(root, "gogitit.lfs.threshold"); vt != "" {
+		if n, err := strconv.ParseInt(vt, 10, 64); err == nil && n > 0 {
+			threshold = n
+		}
+	}
+	return true, threshold
+}
+
+// lfsTrackOversize git-lfs tracks any path larger than threshold. Returns true
+// when at least one path was tracked (so .gitattributes must also be staged).
+func lfsTrackOversize(root string, paths []string, threshold int64) bool {
+	tracked := false
+	for _, p := range paths {
+		fi, err := os.Stat(filepath.Join(root, p))
+		if err != nil || fi.IsDir() || fi.Size() < threshold {
+			continue
+		}
+		if err := gitext.LfsTrack(root, p); err == nil {
+			tracked = true
+		}
+	}
+	return tracked
 }
 
 // Unstage resets the given paths in the index back to HEAD, keeping the working

@@ -77,3 +77,13 @@ export async function loadRepos() {
   const list = await api.listRepos();
   repos.set(list || []);
 }
+
+// MCP state — driven from app settings. Loaded on app start + after a save.
+export const mcpState = writable(null);
+export async function loadMcp() {
+  try {
+    mcpState.set(await api.getMcp());
+  } catch {
+    mcpState.set(null);
+  }
+}

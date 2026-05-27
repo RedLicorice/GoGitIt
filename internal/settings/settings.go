@@ -17,12 +17,24 @@ type Identity struct {
 	Email string `json:"email"`
 }
 
-// Settings is the full persisted state. GitHubPAT is a secret: it is stored on
-// disk but never serialized back to the client (handlers expose only whether a
-// token is set).
+// MCP holds the per-app config for the built-in MCP server (Model Context
+// Protocol) so external LLM clients can drive GoGitIt's git operations.
+// BasicPass is a secret: stored on disk but never serialised to the client
+// (handlers expose only whether one is set).
+type MCP struct {
+	Enabled   bool   `json:"enabled"`
+	AuthMode  string `json:"auth_mode"` // "none" | "basic" | "keycloak"
+	BasicUser string `json:"basic_user"`
+	BasicPass string `json:"basic_pass"`
+}
+
+// Settings is the full persisted state. GitHubPAT and MCP.BasicPass are
+// secrets: stored on disk but never serialised back to the client (handlers
+// expose only whether they are set).
 type Settings struct {
 	Identity  Identity `json:"identity"`
 	GitHubPAT string   `json:"github_pat"`
+	MCP       MCP      `json:"mcp"`
 }
 
 // Store is a JSON-file-backed, mutex-guarded settings store. The file is
@@ -73,6 +85,21 @@ func (s *Store) Update(id Identity, pat *string) error {
 	s.data.Identity = id
 	if pat != nil {
 		s.data.GitHubPAT = *pat
+	}
+	return s.persist()
+}
+
+// UpdateMCP replaces the MCP config. basicPass follows the same *string
+// convention as Update's pat: nil leaves the stored value untouched, "" clears
+// it, a non-empty value sets it.
+func (s *Store) UpdateMCP(m MCP, basicPass *string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.MCP.Enabled = m.Enabled
+	s.data.MCP.AuthMode = m.AuthMode
+	s.data.MCP.BasicUser = m.BasicUser
+	if basicPass != nil {
+		s.data.MCP.BasicPass = *basicPass
 	}
 	return s.persist()
 }

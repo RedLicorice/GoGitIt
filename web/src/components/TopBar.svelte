@@ -1,5 +1,5 @@
 <script>
-  import { user, selectedRepo, sidebarOpen, settingsOpen } from '../lib/stores.js';
+  import { user, selectedRepo, sidebarOpen, settingsOpen, mcpState } from '../lib/stores.js';
 </script>
 
 <header class="h-12 shrink-0 flex items-center justify-between px-4
@@ -37,6 +37,18 @@
   </div>
 
   <div class="flex items-center gap-3 shrink-0">
+    {#if $mcpState}
+      <button
+        class="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded
+               text-[11px] font-mono text-fg-muted hover:bg-border-muted transition-colors"
+        title={$mcpState.enabled ? 'MCP server: enabled — click to configure' : 'MCP server: disabled — click to configure'}
+        aria-label="MCP server status"
+        on:click={() => settingsOpen.set(true)}
+      >
+        <span class="block w-1.5 h-1.5 rounded-full {$mcpState.enabled ? 'bg-success' : 'bg-fg-muted'}"></span>
+        <span class="hidden sm:inline">MCP</span>
+      </button>
+    {/if}
     <button
       class="text-fg-muted hover:text-fg transition-colors p-1 rounded"
       title="Settings"
@@ -52,7 +64,16 @@
         {$user.username || $user.name || $user.subject}
       </span>
       {#if $user.subject !== 'local'}
-        <a href="/auth/logout" class="btn">Logout</a>
+        <a
+          href="/auth/logout"
+          class="text-fg-muted hover:text-fg transition-colors p-1 rounded"
+          title="Logout"
+          aria-label="Logout"
+        >
+          <svg viewBox="0 0 16 16" class="w-5 h-5" fill="currentColor" aria-hidden="true">
+            <path d="M2 2.75A.75.75 0 0 1 2.75 2h6.5a.75.75 0 0 1 0 1.5h-5.75v9h5.75a.75.75 0 0 1 0 1.5h-6.5a.75.75 0 0 1-.75-.75ZM12.193 8H6.75a.75.75 0 0 1 0-1.5h5.443L10.22 4.53a.75.75 0 1 1 1.06-1.06l3.25 3.25a.75.75 0 0 1 0 1.06l-3.25 3.25a.75.75 0 1 1-1.06-1.06L12.193 8Z"/>
+          </svg>
+        </a>
       {/if}
     {/if}
   </div>

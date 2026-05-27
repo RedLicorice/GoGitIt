@@ -209,8 +209,13 @@ type StatusResult struct {
 // Status returns the working-tree status from `git status --porcelain`. Unlike
 // go-git's Worktree.Status it honours core.fileMode, .gitignore, exclude files
 // and .gitattributes — i.e. it matches what the user sees on the command line.
+//
+// --no-optional-locks stops `git status` from writing .git/index (its stat
+// cache refresh). Status runs constantly (every /status request, every live
+// recompute); without this the index write trips the live hub's .git watch and
+// feeds an endless recompute→status→write→recompute loop.
 func Status(repoPath string) (*StatusResult, error) {
-	out, err := run(repoPath, "status", "--porcelain", "-z")
+	out, err := run(repoPath, "--no-optional-locks", "status", "--porcelain", "-z")
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +259,110 @@ func Checkout(repoPath, branch string) error {
 // a real (non-fast-forward) merge would be required.
 func MergeFF(repoPath, branch string) error {
 	_, err := runLocked(repoPath, "merge", "--ff-only", branch)
+	return err
+}
+
+// SubmoduleEntry describes one submodule's path + state, parsed from
+// `git submodule status`.
+type SubmoduleEntry struct {
+	Path         string `json:"path"`
+	Hash         string `json:"hash"`           // recorded commit SHA
+	Initialized  bool   `json:"initialized"`    // false when not yet checked out (line starts with '-')
+	OutOfSync    bool   `json:"out_of_sync"`    // true when worktree commit ≠ recorded (starts with '+')
+	HasConflicts bool   `json:"has_conflicts"`  // merge conflicts in the submodule (starts with 'U')
+}
+
+// ListSubmodules returns the repo's submodules and their state.
+func ListSubmodules(repoPath string) ([]SubmoduleEntry, error) {
+	out, err := run(repoPath, "submodule", "status")
+	if err != nil {
+		return nil, err
+	}
+	var entries []SubmoduleEntry
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if len(line) < 42 {
+			continue
+		}
+		marker := line[0]
+		rest := line[1:]
+		sha := rest[:40]
+		afterSha := strings.TrimPrefix(rest[40:], " ")
+		path := afterSha
+		if idx := strings.Index(afterSha, " ("); idx > 0 {
+			path = afterSha[:idx]
+		}
+		e := SubmoduleEntry{Path: path, Hash: sha}
+		switch marker {
+		case '-':
+			// not initialized
+		case '+':
+			e.Initialized, e.OutOfSync = true, true
+		case 'U':
+			e.Initialized, e.HasConflicts = true, true
+		default: // ' '
+			e.Initialized = true
+		}
+		entries = append(entries, e)
+	}
+	return entries, nil
+}
+
+// SubmoduleUpdate runs `git submodule update --init --recursive`. When remote
+// is true, also passes --remote (advance each submodule to its tracked
+// branch's latest commit).
+func SubmoduleUpdate(repoPath string, remote bool) error {
+	args := []string{"submodule", "update", "--init", "--recursive"}
+	if remote {
+		args = append(args, "--remote")
+	}
+	_, err := runLocked(repoPath, args...)
+	return err
+}
+
+// --- per-repo git config (local) ---
+
+// ConfigGet reads a git config value as the repo would see it at runtime —
+// system / global / local merged, local wins. Returns "" and nil error when
+// the key is unset (git config --get exits 1 in that case).
+func ConfigGet(repoPath, key string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "config", "--get", key)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return "", nil // key unset
+		}
+		return "", fmt.Errorf("git config get %s: %w", key, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ConfigSet writes a repo-local git config value.
+func ConfigSet(repoPath, key, value string) error {
+	_, err := runLocked(repoPath, "config", "--local", key, value)
+	return err
+}
+
+// --- git LFS ---
+
+// LfsAvailable reports whether the git-lfs binary is on PATH.
+func LfsAvailable() bool {
+	_, err := exec.LookPath("git-lfs")
+	return err == nil
+}
+
+// LfsInstallLocal wires LFS hooks/filters for this repo only.
+func LfsInstallLocal(repoPath string) error {
+	_, err := runLocked(repoPath, "lfs", "install", "--local")
+	return err
+}
+
+// LfsTrack tells git-lfs to track the given pattern (writes .gitattributes).
+// `git lfs track` is idempotent for an already-tracked pattern.
+func LfsTrack(repoPath, pattern string) error {
+	_, err := runLocked(repoPath, "lfs", "track", pattern)
 	return err
 }
 

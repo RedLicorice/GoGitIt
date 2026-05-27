@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { user, loadMe, loadRepos, selectedRepo, sidebarOpen } from './lib/stores.js';
+  import { user, loadMe, loadRepos, loadMcp, selectedRepo, sidebarOpen } from './lib/stores.js';
   import { refreshRepoStatuses } from './lib/repostatus.js';
   import { startLive } from './lib/live.js';
   import Sidebar from './components/Sidebar.svelte';
@@ -18,6 +18,7 @@
       await loadMe();
       await loadRepos();
       refreshRepoStatuses();
+      loadMcp();
       startLive();
     } catch (e) {
       error = e.message;

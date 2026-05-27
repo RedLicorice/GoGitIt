@@ -1,8 +1,46 @@
 <script>
-  import { diffMode } from '../lib/stores.js';
+  import { api } from '../lib/api.js';
+  import { diffMode, repos, selectedRepo, selectedRepoId } from '../lib/stores.js';
+  import { addToast } from '../lib/toasts.js';
+  import ShaPill from './ShaPill.svelte';
 
-  // A FileDiff: { path, status, binary, additions, deletions, hunks: [...] }.
+  // A FileDiff: { path, status, binary, additions, deletions, hunks: [...],
+  //   is_submodule?, submodule_old?, submodule_new?, submodule_log? }.
   export let file;
+
+  // Registered submodule repo (if any) matching this entry. Drives the
+  // "Open in GoGitIt" affordance.
+  $: subRepo =
+    file?.is_submodule && $selectedRepo
+      ? $repos.find(
+          (r) =>
+            r.parent_id === $selectedRepo.id &&
+            r.path.replace(/\/$/, '').endsWith('/' + file.path.replace(/\/$/, '')),
+        )
+      : null;
+
+  let working = false;
+  async function commitPushRef() {
+    if (!$selectedRepo) return;
+    working = true;
+    try {
+      const res = await api.submoduleCommitPush($selectedRepo.id, file.path);
+      addToast({
+        kind: 'success',
+        message: `Updated submodule ${file.path} — committed and pushed to ${res.remote}`,
+      });
+    } catch (e) {
+      addToast({ kind: 'error', message: e.message, timeout: 9000 });
+    } finally {
+      working = false;
+    }
+  }
+  function openSubmodule() {
+    if (subRepo) selectedRepoId.set(subRepo.id);
+  }
+  function firstLine(s) {
+    return (s || '').split('\n')[0];
+  }
 
   // Pair up delete/add runs for side-by-side rendering. Context lines map to
   // both columns; a run of N deletes and M adds yields max(N,M) rows, with the
@@ -49,6 +87,67 @@
 {#if file}
   {#if file.binary}
     <div class="px-3 py-3 text-sm text-fg-muted italic">Binary file — diff not shown.</div>
+  {:else if file.is_submodule}
+    <!-- Submodule (gitlink) entry — show the SHAs and a log of commits the
+         submodule moved through; offer to open the submodule (if registered)
+         and to commit + push the gitlink change in this parent. -->
+    <div class="p-3 md:p-6 space-y-4">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded
+                     bg-attention/15 text-attention font-semibold">
+          Submodule
+        </span>
+        <span class="text-sm font-mono text-fg-muted truncate">{file.path}</span>
+      </div>
+
+      <div class="flex items-center gap-2 text-xs flex-wrap">
+        {#if file.submodule_old}
+          <ShaPill sha={file.submodule_old} />
+        {:else}
+          <span class="text-fg-muted italic">(none)</span>
+        {/if}
+        <span class="text-fg-muted">→</span>
+        {#if file.submodule_new}
+          <ShaPill sha={file.submodule_new} />
+        {:else}
+          <span class="text-fg-muted italic">(none)</span>
+        {/if}
+      </div>
+
+      {#if file.submodule_log && file.submodule_log.length}
+        <div class="space-y-1.5">
+          <p class="text-xs uppercase tracking-wider text-fg-muted font-semibold">
+            {file.submodule_log.length} commit{file.submodule_log.length === 1 ? '' : 's'} in the submodule
+          </p>
+          <ul class="border border-border rounded divide-y divide-border bg-canvas-subtle">
+            {#each file.submodule_log as c (c.hash)}
+              <li class="px-2.5 py-1.5">
+                <div class="flex items-center gap-2 min-w-0">
+                  <ShaPill sha={c.hash} label={c.short_hash} />
+                  <span class="text-sm text-fg truncate">{firstLine(c.message)}</span>
+                </div>
+                <div class="text-[11px] text-fg-muted mt-0.5 truncate">{c.author}</div>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {:else if file.submodule_old && file.submodule_new}
+        <p class="text-xs text-fg-muted italic">
+          Cannot read the submodule's history locally — log not available.
+        </p>
+      {/if}
+
+      <div class="flex flex-wrap gap-2 pt-1">
+        {#if subRepo}
+          <button class="btn" on:click={openSubmodule}>
+            Open {subRepo.name} in GoGitIt
+          </button>
+        {/if}
+        <button class="btn btn-primary" disabled={working} on:click={commitPushRef}>
+          {working ? 'Committing…' : 'Commit & push reference'}
+        </button>
+      </div>
+    </div>
   {:else if !file.hunks || file.hunks.length === 0}
     <div class="px-3 py-3 text-sm text-fg-muted italic">No textual changes.</div>
   {:else if $diffMode === 'inline'}

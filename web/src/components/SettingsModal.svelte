@@ -1,5 +1,5 @@
 <script>
-  import { settingsOpen } from '../lib/stores.js';
+  import { settingsOpen, mcpState, loadMcp } from '../lib/stores.js';
   import { api } from '../lib/api.js';
 
   let loading = false;
@@ -10,6 +10,17 @@
   let name = '';
   let email = '';
   let pat = ''; // new token to save; empty = leave the stored one unchanged
+
+  // --- MCP state ---
+  let mcp = null;
+  let mcpEnabled = false;
+  let mcpAuthMode = 'none';
+  let mcpBasicUser = '';
+  let mcpBasicPass = ''; // new password; "" + saved password unchanged = leave
+  let mcpSaving = false;
+  let mcpError = null;
+  let mcpCopied = false;
+  let mcpCopyTimer;
 
   // Transient "saved" feedback.
   let notice = null;
@@ -24,7 +35,94 @@
   let lastOpen = false;
   $: if ($settingsOpen !== lastOpen) {
     lastOpen = $settingsOpen;
-    if ($settingsOpen) loadSettings();
+    if ($settingsOpen) {
+      loadSettings();
+      loadMcpForModal();
+    }
+  }
+
+  async function loadMcpForModal() {
+    mcpError = null;
+    try {
+      mcp = await api.getMcp();
+      mcpEnabled = !!mcp.enabled;
+      mcpAuthMode = mcp.auth_mode || 'none';
+      mcpBasicUser = mcp.basic_user || '';
+      mcpBasicPass = '';
+    } catch (e) {
+      mcpError = e.message;
+    }
+  }
+
+  async function saveMcp() {
+    mcpError = null;
+    mcpSaving = true;
+    try {
+      const payload = {
+        enabled: mcpEnabled,
+        auth_mode: mcpAuthMode,
+        basic_user: mcpBasicUser,
+      };
+      // *string convention: omit to leave the saved password untouched; only
+      // send when the user typed something new.
+      if (mcpBasicPass) payload.basic_pass = mcpBasicPass;
+      mcp = await api.saveMcp(payload);
+      mcpEnabled = !!mcp.enabled;
+      mcpAuthMode = mcp.auth_mode || 'none';
+      mcpBasicUser = mcp.basic_user || '';
+      mcpBasicPass = '';
+      mcpState.set(mcp); // keep the TopBar indicator in sync
+      flashNotice('MCP settings saved!');
+    } catch (e) {
+      mcpError = e.message;
+    } finally {
+      mcpSaving = false;
+    }
+  }
+
+  async function clearMcpBasicPass() {
+    mcpError = null;
+    mcpSaving = true;
+    try {
+      mcp = await api.saveMcp({
+        enabled: mcpEnabled,
+        auth_mode: mcpAuthMode,
+        basic_user: mcpBasicUser,
+        basic_pass: '',
+      });
+      mcpBasicPass = '';
+      mcpState.set(mcp);
+      flashNotice('MCP basic password cleared.');
+    } catch (e) {
+      mcpError = e.message;
+    } finally {
+      mcpSaving = false;
+    }
+  }
+
+  // Snippet to add this MCP server to Claude Code.
+  $: mcpSnippet = (() => {
+    if (typeof window === 'undefined') return '';
+    const url = window.location.origin + '/mcp/sse';
+    let header = '';
+    if (mcpAuthMode === 'basic' && mcpBasicUser) {
+      const pw = mcpBasicPass || (mcp?.basic_pass_set ? '<your-password>' : '');
+      if (pw) {
+        const raw = `${mcpBasicUser}:${pw}`;
+        const b64 = typeof btoa === 'function' ? btoa(raw) : `<base64(${raw})>`;
+        header = ` \\\n    --header "Authorization: Basic ${b64}"`;
+      }
+    }
+    return `claude mcp add gogitit --transport sse ${url}${header}`;
+  })();
+
+  async function copySnippet() {
+    try {
+      await navigator.clipboard.writeText(mcpSnippet);
+      mcpCopied = true;
+      clearTimeout(mcpCopyTimer);
+      mcpCopyTimer = setTimeout(() => (mcpCopied = false), 1500);
+    } catch { /* clipboard unavailable */ }
   }
 
   async function loadSettings() {
@@ -201,6 +299,101 @@
               <div>go-git&nbsp;&nbsp;&nbsp;<span class="text-fg">{data.about.go_git || '—'}</span></div>
               <div>runtime&nbsp;&nbsp;<span class="text-fg">{data.about.go}</span></div>
             </div>
+          </section>
+
+          <!-- MCP server -->
+          <section class="space-y-3">
+            <div>
+              <h4 class="text-xs uppercase tracking-wider text-fg-muted font-semibold">
+                MCP Server
+              </h4>
+              <p class="text-xs text-fg-muted mt-1">
+                Built-in Model Context Protocol server (HTTP + SSE). Lets external
+                LLM clients drive GoGitIt's git operations as tools.
+              </p>
+            </div>
+
+            {#if mcpError}
+              <p class="text-xs text-danger">{mcpError}</p>
+            {/if}
+
+            {#if !mcp}
+              <p class="text-xs text-fg-muted">Loading MCP state…</p>
+            {:else}
+              <label class="flex items-center gap-2 text-sm">
+                <input type="checkbox" bind:checked={mcpEnabled} disabled={mcpSaving} />
+                Enable the MCP server
+              </label>
+
+              <div class="space-y-1">
+                <p class="text-xs text-fg-muted">Authentication mode</p>
+                <div class="flex flex-col gap-1">
+                  <label class="flex items-center gap-2 text-sm">
+                    <input type="radio" name="mcp-auth" value="none" bind:group={mcpAuthMode}
+                           disabled={mcpSaving} />
+                    No auth — anyone reaching <code class="font-mono text-xs">/mcp</code> can call tools
+                  </label>
+                  <label class="flex items-center gap-2 text-sm">
+                    <input type="radio" name="mcp-auth" value="basic" bind:group={mcpAuthMode}
+                           disabled={mcpSaving} />
+                    Basic auth — fixed username + password
+                  </label>
+                  <label class="flex items-center gap-2 text-sm"
+                         class:opacity-50={!mcp.keycloak_available}>
+                    <input type="radio" name="mcp-auth" value="keycloak" bind:group={mcpAuthMode}
+                           disabled={mcpSaving || !mcp.keycloak_available} />
+                    Keycloak OIDC
+                    {#if !mcp.keycloak_available}
+                      <span class="text-[11px] text-fg-muted">
+                        (not available — host auth disabled)
+                      </span>
+                    {/if}
+                  </label>
+                </div>
+              </div>
+
+              {#if mcpAuthMode === 'basic'}
+                <div class="space-y-2 border-l-2 border-border pl-3">
+                  <label class="block text-xs text-fg-muted">
+                    Username
+                    <input class="input mt-1" bind:value={mcpBasicUser}
+                           disabled={mcpSaving} placeholder="mcp" />
+                  </label>
+                  <label class="block text-xs text-fg-muted">
+                    Password
+                    <input class="input mt-1" type="password" bind:value={mcpBasicPass}
+                           disabled={mcpSaving}
+                           placeholder={mcp.basic_pass_set
+                             ? '•••••••••••• (a password is saved)'
+                             : ''} />
+                  </label>
+                  {#if mcp.basic_pass_set}
+                    <button class="btn-mini hover:!text-danger" disabled={mcpSaving}
+                            on:click={clearMcpBasicPass}>
+                      Remove saved password
+                    </button>
+                  {/if}
+                </div>
+              {/if}
+
+              {#if mcpEnabled}
+                <div class="rounded-md border border-border bg-canvas-inset p-3 space-y-2">
+                  <p class="text-xs text-fg-muted">Add to Claude Code:</p>
+                  <pre class="text-[11px] font-mono text-fg whitespace-pre-wrap break-all">{mcpSnippet}</pre>
+                  <div class="flex justify-end">
+                    <button class="btn-mini" on:click={copySnippet}>
+                      {mcpCopied ? 'Copied!' : 'Copy snippet'}
+                    </button>
+                  </div>
+                </div>
+              {/if}
+
+              <div class="flex justify-end">
+                <button class="btn btn-primary" disabled={mcpSaving} on:click={saveMcp}>
+                  {mcpSaving ? 'Saving…' : 'Save MCP settings'}
+                </button>
+              </div>
+            {/if}
           </section>
         {/if}
       </div>

@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
 	gitdiff "github.com/go-git/go-git/v5/utils/diff"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
@@ -49,6 +52,16 @@ type FileDiff struct {
 	Additions int        `json:"additions"`
 	Deletions int        `json:"deletions"`
 	Hunks     []DiffHunk `json:"hunks"`
+
+	// Submodule entries (mode 160000) reference a commit in another repository,
+	// not a blob — the regular blob-diff path fails on them ("object not
+	// found"). When IsSubmodule is true the hunks hold a synthetic 2-line
+	// "Subproject commit" diff, and these fields carry the gitlink SHAs so the
+	// UI can render submodule-aware affordances.
+	IsSubmodule  bool     `json:"is_submodule,omitempty"`
+	SubmoduleOld string   `json:"submodule_old,omitempty"`
+	SubmoduleNew string   `json:"submodule_new,omitempty"`
+	SubmoduleLog []Commit `json:"submodule_log,omitempty"`
 }
 
 // rawOp is a normalized diff operation shared by the go-git patch path and the
@@ -101,7 +114,7 @@ func CommitDiff(repo *gogit.Repository, hash string) ([]FileDiff, error) {
 		return nil, fmt.Errorf("patch: %w", err)
 	}
 
-	return filePatchesToDiffs(patch.FilePatches()), nil
+	return filePatchesToDiffs(repo, patch.FilePatches()), nil
 }
 
 // WorktreeDiff returns the structured diff of a single file in the working
@@ -109,6 +122,12 @@ func CommitDiff(repo *gogit.Repository, hash string) ([]FileDiff, error) {
 // would record); otherwise it diffs the index — or HEAD, for untracked
 // files — against the file currently on disk.
 func WorktreeDiff(repo *gogit.Repository, path string, staged bool) (*FileDiff, error) {
+	// Submodule (gitlink) entries reference a commit in another repo, not a
+	// blob — the blob-diff path errors with "object not found". Render the
+	// gitlink-style "Subproject commit" diff instead.
+	if fd := maybeSubmoduleDiff(repo, path, staged); fd != nil {
+		return fd, nil
+	}
 	headText, headOK, err := headFileContent(repo, path)
 	if err != nil {
 		return nil, err
@@ -168,10 +187,26 @@ func WorktreeDiff(repo *gogit.Repository, path string, staged bool) (*FileDiff, 
 }
 
 // filePatchesToDiffs converts go-git file patches into FileDiff values.
-func filePatchesToDiffs(fps []fdiff.FilePatch) []FileDiff {
+func filePatchesToDiffs(repo *gogit.Repository, fps []fdiff.FilePatch) []FileDiff {
 	out := make([]FileDiff, 0, len(fps))
 	for _, fp := range fps {
 		from, to := fp.Files()
+
+		// Submodule (gitlink) entry — go-git can't read its "blob" content, so
+		// build the diff from the gitlink SHAs directly.
+		if (from != nil && from.Mode() == filemode.Submodule) ||
+			(to != nil && to.Mode() == filemode.Submodule) {
+			var oldSha, newSha, path string
+			if from != nil {
+				oldSha, path = from.Hash().String(), from.Path()
+			}
+			if to != nil {
+				newSha, path = to.Hash().String(), to.Path()
+			}
+			out = append(out, *buildSubmoduleFileDiff(repo, path, oldSha, newSha))
+			continue
+		}
+
 		fd := FileDiff{Hunks: []DiffHunk{}}
 
 		switch {
@@ -396,4 +431,169 @@ func worktreeFileContent(repo *gogit.Repository, path string) (string, bool, err
 		return "", false, fmt.Errorf("worktree read: %w", err)
 	}
 	return string(data), true, nil
+}
+
+// --- submodule (gitlink) handling ---
+
+// maybeSubmoduleDiff returns a FileDiff when path is a submodule (gitlink,
+// mode 160000), or nil otherwise. A submodule entry's hash is a commit in the
+// submodule's repo, not a blob in the parent — the regular diff path errors,
+// so we synthesize a "Subproject commit OLD -> NEW" diff like git itself.
+func maybeSubmoduleDiff(repo *gogit.Repository, path string, staged bool) *FileDiff {
+	idx, err := repo.Storer.Index()
+	if err != nil {
+		return nil
+	}
+	entry, indexErr := idx.Entry(path)
+	indexHash, indexIsSub := "", false
+	if indexErr == nil && entry.Mode == filemode.Submodule {
+		indexHash, indexIsSub = entry.Hash.String(), true
+	}
+	headHash, headIsSub := submoduleHeadTreeHash(repo, path)
+	if !indexIsSub && !headIsSub {
+		return nil
+	}
+
+	var oldSha, newSha string
+	if staged {
+		oldSha, newSha = headHash, indexHash
+	} else {
+		oldSha = indexHash
+		if oldSha == "" {
+			oldSha = headHash
+		}
+		newSha = submoduleCurrentHEAD(repo, path)
+	}
+	return buildSubmoduleFileDiff(repo, path, oldSha, newSha)
+}
+
+// submoduleHeadTreeHash returns the hash recorded for a submodule path in
+// HEAD's tree and whether the entry was actually a submodule.
+func submoduleHeadTreeHash(repo *gogit.Repository, path string) (string, bool) {
+	head, err := repo.Head()
+	if err != nil {
+		return "", false
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return "", false
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return "", false
+	}
+	entry, err := tree.FindEntry(path)
+	if err != nil || entry.Mode != filemode.Submodule {
+		return "", false
+	}
+	return entry.Hash.String(), true
+}
+
+// submoduleCurrentHEAD opens the submodule at <parent worktree>/<path> and
+// returns its current HEAD commit, or "" if it cannot be opened.
+func submoduleCurrentHEAD(repo *gogit.Repository, subPath string) string {
+	wt, err := repo.Worktree()
+	if err != nil {
+		return ""
+	}
+	sub, err := gogit.PlainOpen(filepath.Join(wt.Filesystem.Root(), subPath))
+	if err != nil {
+		return ""
+	}
+	head, err := sub.Head()
+	if err != nil {
+		return ""
+	}
+	return head.Hash().String()
+}
+
+// buildSubmoduleFileDiff assembles a FileDiff for a submodule entry: status,
+// the synthetic two-line "Subproject commit" hunk git prints, and — when both
+// sides resolve and the submodule is locally checked out — the log of commits
+// the gitlink moved through.
+func buildSubmoduleFileDiff(repo *gogit.Repository, path, oldSha, newSha string) *FileDiff {
+	fd := &FileDiff{
+		Path:         path,
+		IsSubmodule:  true,
+		SubmoduleOld: oldSha,
+		SubmoduleNew: newSha,
+		Hunks:        []DiffHunk{},
+	}
+	switch {
+	case oldSha == "" && newSha != "":
+		fd.Status = "A"
+	case oldSha != "" && newSha == "":
+		fd.Status = "D"
+	default:
+		fd.Status = "M"
+	}
+	if oldSha == newSha {
+		return fd
+	}
+
+	var lines []DiffLine
+	if oldSha != "" {
+		lines = append(lines, DiffLine{Type: "delete", Content: "Subproject commit " + oldSha, OldLine: 1})
+	}
+	if newSha != "" {
+		lines = append(lines, DiffLine{Type: "add", Content: "Subproject commit " + newSha, NewLine: 1})
+	}
+	h := DiffHunk{Lines: lines}
+	if oldSha != "" {
+		h.OldStart, h.OldLines = 1, 1
+	}
+	if newSha != "" {
+		h.NewStart, h.NewLines = 1, 1
+	}
+	h.Header = fmt.Sprintf("@@ -%d,%d +%d,%d @@", h.OldStart, h.OldLines, h.NewStart, h.NewLines)
+	fd.Hunks = []DiffHunk{h}
+	fd.Additions, fd.Deletions = countChanges(fd.Hunks)
+	fd.SubmoduleLog = submoduleLog(repo, path, oldSha, newSha)
+	return fd
+}
+
+// submoduleLog walks the submodule's history from newSha back to oldSha
+// (exclusive), capped at 50 commits. Returns nil if either SHA is empty or
+// the submodule cannot be opened locally.
+func submoduleLog(repo *gogit.Repository, subPath, oldSha, newSha string) []Commit {
+	if oldSha == "" || newSha == "" {
+		return nil
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		return nil
+	}
+	sub, err := gogit.PlainOpen(filepath.Join(wt.Filesystem.Root(), subPath))
+	if err != nil {
+		return nil
+	}
+	iter, err := sub.Log(&gogit.LogOptions{From: plumbing.NewHash(newSha)})
+	if err != nil {
+		return nil
+	}
+	defer iter.Close()
+	const cap = 50
+	var out []Commit
+	_ = iter.ForEach(func(c *object.Commit) error {
+		if c.Hash.String() == oldSha {
+			return storer.ErrStop
+		}
+		short := c.Hash.String()
+		if len(short) >= 7 {
+			short = short[:7]
+		}
+		out = append(out, Commit{
+			Hash:      c.Hash.String(),
+			ShortHash: short,
+			Message:   c.Message,
+			Author:    c.Author.Name,
+			Email:     c.Author.Email,
+			Date:      c.Author.When,
+		})
+		if len(out) >= cap {
+			return storer.ErrStop
+		}
+		return nil
+	})
+	return out
 }

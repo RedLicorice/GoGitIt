@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/RedLicorice/GoGitIt/internal/auth"
 	"github.com/RedLicorice/GoGitIt/internal/config"
@@ -57,6 +59,14 @@ func NewRouter(cfg *config.Config, authP auth.Provider, registry *repo.Registry,
 	// Live updates: watches repo working trees, pushes status over WebSocket.
 	hub := newLiveHub(registry, cfg)
 
+	// Built-in MCP server (HTTP+SSE). Auth + enable are driven by app settings
+	// and checked per-request, so toggling in the UI takes effect immediately.
+	mcpH := newMCPHub(registry, set, cfg, authP)
+	r.Group(func(g chi.Router) {
+		g.Use(mcpH.authMiddleware)
+		g.Mount("/mcp", mcpH.sse)
+	})
+
 	// Protected API
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(authP.Middleware)
@@ -68,6 +78,8 @@ func NewRouter(cfg *config.Config, authP auth.Provider, registry *repo.Registry,
 		// Settings
 		api.Get("/settings", settingsGet(set, cfg.GH.Enabled))
 		api.Put("/settings", settingsPut(set, cfg.GH.Enabled))
+		api.Get("/settings/mcp", mcpSettingsGet(set, cfg))
+		api.Put("/settings/mcp", mcpSettingsPut(set, cfg))
 
 		// Repos
 		api.Get("/repos", listRepos(registry))
@@ -109,6 +121,11 @@ func NewRouter(cfg *config.Config, authP auth.Provider, registry *repo.Registry,
 		api.Post("/repos/{id}/stash", repoStashOp(registry, "stash"))
 		api.Post("/repos/{id}/stash/pop", repoStashOp(registry, "pop"))
 		api.Post("/repos/{id}/parent-update", repoParentUpdate(registry, set, cfg.GH.Enabled))
+		api.Post("/repos/{id}/submodule-commit-push", repoSubmoduleCommitPush(registry, set, cfg.GH.Enabled))
+		api.Get("/repos/{id}/submodules", repoSubmodules(registry))
+		api.Post("/repos/{id}/submodules/update", repoSubmodulesUpdate(registry))
+		api.Get("/repos/{id}/lfs", repoLfsGet(registry))
+		api.Put("/repos/{id}/lfs", repoLfsPut(registry))
 	})
 
 	// Embedded SPA — serves everything not matched by the routes above.
@@ -219,29 +236,35 @@ type repoStatusSummary struct {
 func reposStatuses(reg *repo.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		entries := reg.List()
-		out := make([]repoStatusSummary, 0, len(entries))
-		for _, e := range entries {
-			s := repoStatusSummary{ID: e.ID}
-			repo, err := gitops.Open(e.Path)
-			if err != nil {
-				s.Error = err.Error()
-				out = append(out, s)
-				continue
-			}
-			st, err := gitops.GetStatus(repo)
-			if err != nil {
-				s.Error = err.Error()
-				out = append(out, s)
-				continue
-			}
-			s.Branch = st.Branch
-			s.Detached = st.Detached
-			s.LocalBranch = st.LocalBranch
-			s.Ahead = st.Ahead
-			s.Behind = st.Behind
-			s.ChangedFiles = len(st.Staged) + len(st.Unstaged) + len(st.Untracked)
-			out = append(out, s)
+		out := make([]repoStatusSummary, len(entries))
+		var wg sync.WaitGroup
+		for i, e := range entries {
+			wg.Add(1)
+			go func(i int, e *repo.Entry) {
+				defer wg.Done()
+				s := repoStatusSummary{ID: e.ID}
+				repo, err := gitops.Open(e.Path)
+				if err != nil {
+					s.Error = err.Error()
+					out[i] = s
+					return
+				}
+				st, err := gitops.GetStatus(repo)
+				if err != nil {
+					s.Error = err.Error()
+					out[i] = s
+					return
+				}
+				s.Branch = st.Branch
+				s.Detached = st.Detached
+				s.LocalBranch = st.LocalBranch
+				s.Ahead = st.Ahead
+				s.Behind = st.Behind
+				s.ChangedFiles = len(st.Staged) + len(st.Unstaged) + len(st.Untracked)
+				out[i] = s
+			}(i, e)
 		}
+		wg.Wait()
 		writeJSON(w, http.StatusOK, out)
 	}
 }
@@ -865,6 +888,218 @@ func repoParentUpdate(reg *repo.Registry, set *settings.Store, ghEnabled bool) h
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"parent": parent.Name, "remote": remoteName})
+	}
+}
+
+// repoSubmoduleCommitPush stages a submodule path's updated gitlink in this
+// repo, commits, and pushes. Parent-side counterpart to repoParentUpdate —
+// invoked from the parent's diff view, takes the submodule path directly so
+// the submodule does not need to be registered as a separate repo.
+func repoSubmoduleCommitPush(reg *repo.Registry, set *settings.Store, ghEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		e, err := reg.Get(chi.URLParam(r, "id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Path == "" {
+			http.Error(w, "path required", http.StatusBadRequest)
+			return
+		}
+		if err := gitext.StageSubmodule(e.Path, body.Path); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		repo, err := gitops.Open(e.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		st, err := gitops.GetStatus(repo)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if len(st.Staged) == 0 {
+			http.Error(w, "nothing to commit — gitlink unchanged", http.StatusBadRequest)
+			return
+		}
+		id := set.Get().Identity
+		if _, err := gitops.CreateCommit(repo, fmt.Sprintf("Update submodule %s", body.Path), id.Name, id.Email); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		remoteName := gitops.CurrentRemote(repo)
+		rm, err := repo.Remote(remoteName)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("no remote %q", remoteName), http.StatusBadRequest)
+			return
+		}
+		urls := rm.Config().URLs
+		if len(urls) == 0 {
+			http.Error(w, "remote has no URL", http.StatusBadRequest)
+			return
+		}
+		ghToken := ""
+		if ghEnabled {
+			ghToken, _ = gh.Token()
+		}
+		auth, err := gitops.ResolveAuth(urls[0], ghToken, set.Get().GitHubPAT)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := gitops.Push(repo, remoteName, auth); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"path": body.Path, "remote": remoteName})
+	}
+}
+
+// lfsState is the per-repo LFS state returned by GET/PUT /repos/{id}/lfs.
+type lfsState struct {
+	Available      bool  `json:"available"`       // git-lfs binary on PATH
+	HooksInstalled bool  `json:"hooks_installed"` // filter.lfs.clean wired in this repo
+	Enabled        bool  `json:"enabled"`         // gogitit.lfs.enabled (auto-track on stage)
+	ThresholdBytes int64 `json:"threshold_bytes"` // gogitit.lfs.threshold
+}
+
+func readLfsState(repoPath string) lfsState {
+	v, _ := gitext.ConfigGet(repoPath, "gogitit.lfs.enabled")
+	threshold := int64(100 * 1024 * 1024)
+	if vt, _ := gitext.ConfigGet(repoPath, "gogitit.lfs.threshold"); vt != "" {
+		if n, err := strconv.ParseInt(vt, 10, 64); err == nil && n > 0 {
+			threshold = n
+		}
+	}
+	clean, _ := gitext.ConfigGet(repoPath, "filter.lfs.clean")
+	return lfsState{
+		Available:      gitext.LfsAvailable(),
+		HooksInstalled: clean != "",
+		Enabled:        strings.EqualFold(v, "true"),
+		ThresholdBytes: threshold,
+	}
+}
+
+// repoLfsGet returns the per-repo LFS state — both git's own (hooks installed)
+// and GoGitIt's auto-tracking config.
+func repoLfsGet(reg *repo.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		e, err := reg.Get(chi.URLParam(r, "id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, readLfsState(e.Path))
+	}
+}
+
+// repoLfsPut updates the per-repo LFS auto-tracking config. Enabling also runs
+// `git lfs install --local` so LFS filters are wired even if they weren't yet.
+func repoLfsPut(reg *repo.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		e, err := reg.Get(chi.URLParam(r, "id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Enabled        bool  `json:"enabled"`
+			ThresholdBytes int64 `json:"threshold_bytes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if body.Enabled && !gitext.LfsAvailable() {
+			http.Error(w, "git-lfs is not installed on the host", http.StatusBadRequest)
+			return
+		}
+		if body.ThresholdBytes <= 0 {
+			body.ThresholdBytes = 100 * 1024 * 1024
+		}
+		if err := gitext.ConfigSet(e.Path, "gogitit.lfs.enabled", strconv.FormatBool(body.Enabled)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := gitext.ConfigSet(e.Path, "gogitit.lfs.threshold", strconv.FormatInt(body.ThresholdBytes, 10)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if body.Enabled {
+			if err := gitext.LfsInstallLocal(e.Path); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, readLfsState(e.Path))
+	}
+}
+
+// repoSubmodules lists a repo's submodules with their state, augmenting each
+// entry with the registered repo (if any) that GoGitIt knows for that path.
+func repoSubmodules(reg *repo.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		e, err := reg.Get(chi.URLParam(r, "id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		entries, err := gitext.ListSubmodules(e.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Index registered repos by clean path so each submodule can carry its
+		// registered_id / registered_name if it has been added to GoGitIt.
+		byPath := map[string]*repo.Entry{}
+		for _, x := range reg.List() {
+			byPath[filepath.Clean(x.Path)] = x
+		}
+		type row struct {
+			gitext.SubmoduleEntry
+			AbsPath        string `json:"abs_path"`
+			RegisteredID   string `json:"registered_id,omitempty"`
+			RegisteredName string `json:"registered_name,omitempty"`
+		}
+		parent := filepath.Clean(e.Path)
+		out := make([]row, 0, len(entries))
+		for _, s := range entries {
+			abs := filepath.Join(parent, s.Path)
+			rr := row{SubmoduleEntry: s, AbsPath: abs}
+			if hit, ok := byPath[filepath.Clean(abs)]; ok {
+				rr.RegisteredID, rr.RegisteredName = hit.ID, hit.Name
+			}
+			out = append(out, rr)
+		}
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+// repoSubmodulesUpdate runs `git submodule update --init --recursive` for the
+// repo. Body `{remote: true}` adds --remote (advance each submodule to its
+// tracked branch's latest commit).
+func repoSubmodulesUpdate(reg *repo.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		e, err := reg.Get(chi.URLParam(r, "id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Remote bool `json:"remote"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body) // body optional
+		if err := gitext.SubmoduleUpdate(e.Path, body.Remote); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		entries, _ := gitext.ListSubmodules(e.Path)
+		writeJSON(w, http.StatusOK, map[string]any{"submodules": entries})
 	}
 }
 

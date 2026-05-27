@@ -35,6 +35,10 @@ export const api = {
   saveSettings: (payload) =>
     request('/settings', { method: 'PUT', body: JSON.stringify(payload) }),
 
+  getMcp: () => request('/settings/mcp'),
+  saveMcp: (payload) =>
+    request('/settings/mcp', { method: 'PUT', body: JSON.stringify(payload) }),
+
   listRepos: () => request('/repos'),
   repoStatuses: () => request('/repos/statuses'),
   addRepo: (name, path) =>
@@ -103,6 +107,32 @@ export const api = {
   stash: (id) => request(`/repos/${id}/stash`, { method: 'POST' }),
   stashPop: (id) => request(`/repos/${id}/stash/pop`, { method: 'POST' }),
 
-  // Submodule: stage + commit + push the parent's gitlink.
+  // Submodule: stage + commit + push the parent's gitlink. parentUpdate is
+  // invoked from a submodule's push toast (the child knows its own id).
+  // submoduleCommitPush is invoked from the parent's diff view (the parent
+  // knows the submodule path); the submodule does not need to be registered.
   parentUpdate: (id) => request(`/repos/${id}/parent-update`, { method: 'POST' }),
+  submoduleCommitPush: (id, path) =>
+    request(`/repos/${id}/submodule-commit-push`, {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+
+  // Per-repo LFS state (auto-tracking + git-lfs hooks).
+  getLfs: (id) => request(`/repos/${id}/lfs`),
+  setLfs: (id, enabled, thresholdBytes) =>
+    request(`/repos/${id}/lfs`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled, threshold_bytes: thresholdBytes }),
+    }),
+
+  // List a repo's submodules + their state (augmented with registered_id /
+  // registered_name when the submodule is already added to GoGitIt).
+  submodules: (id) => request(`/repos/${id}/submodules`),
+  // Run `git submodule update --init --recursive [--remote]`.
+  submodulesUpdate: (id, remote) =>
+    request(`/repos/${id}/submodules/update`, {
+      method: 'POST',
+      body: JSON.stringify({ remote: !!remote }),
+    }),
 };

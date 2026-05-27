@@ -7,11 +7,13 @@
   import History from './History.svelte';
   import RepoSettings from './RepoSettings.svelte';
   import BranchMenu from './BranchMenu.svelte';
+  import SubmoduleMenu from './SubmoduleMenu.svelte';
 
   export let repo;
 
   let branches = [];
   let currentBranch = '';
+  let hasSubmodules = false;
   // Bumped to remount the active view so it reloads after a sync.
   let dataVersion = 0;
   let lastRepoId = null;
@@ -23,6 +25,17 @@
       currentBranch = (branches.find((b) => b.is_current) || {}).name || '';
     } catch (e) {
       branches = [];
+    }
+  }
+
+  // Probe whether the repo has submodules so the SubmoduleMenu only appears
+  // when there is something to manage.
+  async function probeSubmodules() {
+    try {
+      const list = await api.submodules(repo.id);
+      hasSubmodules = Array.isArray(list) && list.length > 0;
+    } catch {
+      hasSubmodules = false;
     }
   }
 
@@ -44,6 +57,7 @@
   $: if (repo && repo.id !== lastRepoId) {
     lastRepoId = repo.id;
     loadBranches();
+    probeSubmodules();
   }
 
   // A branch create/switch/delete/merge changed the repo — refresh everything.
@@ -145,6 +159,9 @@
           <path d="M3 3h10"/>
         </svg>
       </button>
+      {#if hasSubmodules}
+        <SubmoduleMenu {repo} />
+      {/if}
       <span class="text-xs text-fg-muted ml-1">branch</span>
       <BranchMenu
         {repo}

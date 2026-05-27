@@ -1,5 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
+  import { addToast } from '../lib/toasts.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   export let repo;
@@ -8,6 +9,12 @@
   let loading = true;
   let error = null;
   let working = false;
+
+  // LFS state (per-repo). null until loaded.
+  let lfs = null;
+  let lfsEnabled = false;
+  let lfsThresholdMB = 100;
+  let lfsSaving = false;
 
   // Editable URL per remote, keyed by remote name.
   let urlEdits = {};
@@ -21,6 +28,35 @@
   $: if (repo && repo.id !== lastRepoId) {
     lastRepoId = repo.id;
     load();
+    loadLfs();
+  }
+
+  async function loadLfs() {
+    try {
+      lfs = await api.getLfs(repo.id);
+      lfsEnabled = !!lfs.enabled;
+      lfsThresholdMB = Math.max(1, Math.round((lfs.threshold_bytes || 0) / (1024 * 1024)));
+      if (!lfsThresholdMB) lfsThresholdMB = 100;
+    } catch {
+      lfs = null;
+    }
+  }
+
+  async function saveLfs() {
+    lfsSaving = true;
+    try {
+      const mb = Math.max(1, Math.round(Number(lfsThresholdMB) || 100));
+      lfs = await api.setLfs(repo.id, lfsEnabled, mb * 1024 * 1024);
+      lfsThresholdMB = Math.round(lfs.threshold_bytes / (1024 * 1024));
+      addToast({
+        kind: 'success',
+        message: lfsEnabled ? 'LFS auto-tracking enabled' : 'LFS auto-tracking disabled',
+      });
+    } catch (e) {
+      addToast({ kind: 'error', message: e.message, timeout: 9000 });
+    } finally {
+      lfsSaving = false;
+    }
   }
 
   function resetEdits() {
@@ -171,6 +207,65 @@
         </div>
       </div>
     {/if}
+
+    <!-- Git LFS section -->
+    <div class="border-t border-border pt-6 space-y-3">
+      <div>
+        <h2 class="text-base font-semibold text-fg">Git LFS</h2>
+        <p class="text-xs text-fg-muted mt-0.5">
+          On stage, files larger than the threshold are auto-tracked with
+          git-lfs so they land as pointers rather than huge blobs. Stored in
+          this repo's local git config (<code>gogitit.lfs.*</code>).
+        </p>
+      </div>
+
+      {#if !lfs}
+        <p class="text-sm text-fg-muted">Loading…</p>
+      {:else if !lfs.available}
+        <p class="text-sm text-attention bg-attention/10 rounded px-3 py-2">
+          <code>git-lfs</code> is not installed on the host — install it to enable.
+        </p>
+      {:else}
+        <p class="text-xs text-fg-muted">
+          LFS hooks in this repo:
+          {#if lfs.hooks_installed}
+            <span class="text-success">installed</span>
+            — git-lfs filters are wired (large files already go through LFS).
+          {:else}
+            <span class="text-fg-muted">not installed</span>
+            — enabling below will run <code>git lfs install --local</code> for you.
+          {/if}
+        </p>
+
+        <label class="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            bind:checked={lfsEnabled}
+            disabled={lfsSaving}
+          />
+          Auto-track files over the threshold on stage
+        </label>
+
+        <div class="flex items-end gap-3">
+          <label class="flex flex-col gap-1 text-sm">
+            <span class="text-xs text-fg-muted">Threshold (MB)</span>
+            <input
+              class="input w-32"
+              type="number"
+              min="1"
+              step="1"
+              bind:value={lfsThresholdMB}
+              disabled={!lfsEnabled || lfsSaving}
+            />
+          </label>
+          <button
+            class="btn btn-primary"
+            disabled={lfsSaving}
+            on:click={saveLfs}
+          >{lfsSaving ? 'Saving…' : 'Save'}</button>
+        </div>
+      {/if}
+    </div>
   </div>
 </div>
 

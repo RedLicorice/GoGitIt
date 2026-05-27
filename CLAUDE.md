@@ -261,12 +261,47 @@ Implemented in the initial scaffold:
       `…/stash/pop` (untracked included); Stash / Pop buttons in the Changes
       commit area. Detached-HEAD recovery: Changes offers an inline "create a
       branch" to move the work onto a branch.
-- [x] Submodule awareness — `Registry.ParentOf` detects a registered repo that
-      is a submodule of another (`.git`-file + path prefix). `/repos` carries
-      `parent_id`/`parent_name`; `RepoView` shows a "submodule of X" badge.
-      Pushing a submodule offers a toast action "Update parent reference &
-      push" → `POST /repos/{id}/parent-update` stages the gitlink in the
-      parent, commits, and pushes it.
+- [x] Submodule awareness — `Registry.ParentOf` detects a registered repo
+      that is a submodule of another (`.git`-file + path prefix). `/repos`
+      carries `parent_id`/`parent_name`; the Sidebar repo row shows a small
+      fork-icon + parent name. Pushing a submodule offers a toast action
+      "Update parent reference & push" → `POST /repos/{id}/parent-update`
+      stages the gitlink in the parent, commits, and pushes it.
+- [x] Submodule management — `gitext.ListSubmodules` (parses
+      `git submodule status`) and `gitext.SubmoduleUpdate`
+      (`--init --recursive [--remote]`). `GET /repos/{id}/submodules` returns
+      each entry with state + `registered_id`/`registered_name` for any that
+      are already added to GoGitIt; `POST .../submodules/update` runs the
+      update. `SubmoduleMenu.svelte` is a popover on the `RepoView` tab bar
+      (shown only when the repo has submodules) — per-entry **Open** (if
+      registered) or **Add to GoGitIt** (otherwise), and the bulk update
+      commands. Submodule (gitlink) diffs are rendered specially by
+      `DiffViewer`: synthetic "Subproject commit OLD→NEW" hunk, SHA pills,
+      capped log of commits the gitlink moved through, and a one-click
+      **Commit & push reference** button → `POST .../submodule-commit-push`
+      stages, commits and pushes the gitlink change in the parent.
+
+- [x] Git LFS — per-repo settings in the Repo Settings tab: toggle
+      auto-tracking + threshold (default 100 MB). State stored as
+      `gogitit.lfs.*` in the repo's local git config. `git.Stage` is
+      LFS-aware: when auto-tracking is on, files over the threshold are
+      `git lfs track`'d (and `.gitattributes` staged) before `git add`, so
+      they land as pointers rather than blobs. Endpoints `GET`/`PUT
+      /repos/{id}/lfs` return + accept `{available, hooks_installed, enabled,
+      threshold_bytes}`; `hooks_installed` reads the effective `filter.lfs.clean`
+      (so a global `git lfs install` is recognised, not just local).
+
+- [x] Built-in MCP server — `internal/api/mcp.go` registers GoGitIt's git
+      ops as MCP tools (list_repos, repo_status, repo_log, repo_branches,
+      repo_diff, repo_stage, repo_unstage, repo_commit, repo_push, repo_fetch)
+      and serves them over HTTP + SSE via `mark3labs/mcp-go` at `/mcp/sse` +
+      `/mcp/message` (mounted with `WithStaticBasePath("/mcp")`). Per-app
+      config in `settings.MCP`: toggle + auth mode (`none` | `basic` |
+      `keycloak`, the last gated on `cfg.Auth.Enabled`). Per-request middleware
+      reads settings live so toggling takes effect immediately. Settings UI
+      in `SettingsModal` includes a copyable `claude mcp add` snippet that
+      bakes in the basic-auth header. TopBar shows an MCP status dot (green
+      when enabled). Logout is now an icon button.
 
 Roadmap complete — every planned item is implemented.
 
