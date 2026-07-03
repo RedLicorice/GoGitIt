@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -385,8 +384,15 @@ func repoRaw(reg *repo.Registry) http.HandlerFunc {
 		var rerr error
 		if ref == "" {
 			abs := filepath.Join(e.Path, clean)
-			rootAbs, _ := filepath.Abs(e.Path)
-			tgtAbs, _ := filepath.Abs(abs)
+			// Resolve symlinks before the containment check — os.Open follows
+			// them, so a symlink inside the repo pointing outside would leak
+			// arbitrary host files otherwise.
+			rootAbs, rootErr := filepath.EvalSymlinks(e.Path)
+			tgtAbs, tgtErr := filepath.EvalSymlinks(abs)
+			if rootErr != nil || tgtErr != nil {
+				http.Error(w, "path not found", http.StatusNotFound)
+				return
+			}
 			if !strings.HasPrefix(tgtAbs, rootAbs+string(os.PathSeparator)) && tgtAbs != rootAbs {
 				http.Error(w, "path escapes repo", http.StatusBadRequest)
 				return
@@ -415,12 +421,28 @@ func repoRaw(reg *repo.Registry) http.HandlerFunc {
 			http.Error(w, rerr.Error(), http.StatusInternalServerError)
 			return
 		}
-		ct := mime.TypeByExtension(strings.ToLower(filepath.Ext(clean)))
-		if ct == "" {
-			ct = "application/octet-stream"
+		// Repo bytes are attacker-controllable and served on the app origin,
+		// so never let the browser render active content (HTML/SVG/JS) inline.
+		// Allowlist safe raster image types for inline preview; force
+		// everything else to download as an opaque octet-stream.
+		inlineTypes := map[string]string{
+			".png":  "image/png",
+			".jpg":  "image/jpeg",
+			".jpeg": "image/jpeg",
+			".gif":  "image/gif",
+			".webp": "image/webp",
+			".avif": "image/avif",
+			".bmp":  "image/bmp",
+			".ico":  "image/x-icon",
 		}
-		w.Header().Set("Content-Type", ct)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
+		if ct, ok := inlineTypes[strings.ToLower(filepath.Ext(clean))]; ok {
+			w.Header().Set("Content-Type", ct)
+		} else {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(clean)))
+		}
 		_, _ = w.Write(data)
 	}
 }
