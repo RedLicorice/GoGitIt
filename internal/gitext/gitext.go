@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -215,7 +216,7 @@ type StatusResult struct {
 // recompute); without this the index write trips the live hub's .git watch and
 // feeds an endless recompute→status→write→recompute loop.
 func Status(repoPath string) (*StatusResult, error) {
-	out, err := run(repoPath, "--no-optional-locks", "status", "--porcelain", "-z")
+	out, err := run(repoPath, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return nil, err
 	}
@@ -343,6 +344,66 @@ func ConfigGet(repoPath, key string) (string, error) {
 func ConfigSet(repoPath, key, value string) error {
 	_, err := runLocked(repoPath, "config", "--local", key, value)
 	return err
+}
+
+// --- ahead / behind / rebase ---
+
+// AheadBehind returns how many commits HEAD is ahead and behind upstream.
+// upstream should be a ref the local repo knows, e.g. "origin/main".
+func AheadBehind(repoPath, upstream string) (ahead, behind int, err error) {
+	aOut, aErr := run(repoPath, "rev-list", "--count", upstream+"..HEAD")
+	if aErr != nil {
+		return 0, 0, aErr
+	}
+	bOut, bErr := run(repoPath, "rev-list", "--count", "HEAD.."+upstream)
+	if bErr != nil {
+		return 0, 0, bErr
+	}
+	ahead, _ = strconv.Atoi(strings.TrimSpace(aOut))
+	behind, _ = strconv.Atoi(strings.TrimSpace(bOut))
+	return ahead, behind, nil
+}
+
+// LogOneline returns one-line log entries for the given git revision range.
+func LogOneline(repoPath, revRange string) ([]string, error) {
+	out, err := run(repoPath, "log", "--oneline", revRange)
+	if err != nil {
+		return nil, err
+	}
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines, nil
+}
+
+// IsDirty reports whether the working tree or index has any uncommitted changes.
+func IsDirty(repoPath string) (bool, error) {
+	out, err := run(repoPath, "--no-optional-locks", "status", "--porcelain", "-z")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+// RebaseOnto rebases the current branch onto upstream (e.g. "origin/main").
+// On success returns nil, nil. On conflict, aborts the rebase and returns the
+// conflicting file paths plus a sentinel error.
+func RebaseOnto(repoPath, upstream string) (conflictFiles []string, err error) {
+	_, err = runLocked(repoPath, "-c", "advice.diverging=false", "rebase", upstream)
+	if err == nil {
+		return nil, nil
+	}
+	out, _ := run(repoPath, "diff", "--name-only", "--diff-filter=U")
+	for _, f := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f != "" {
+			conflictFiles = append(conflictFiles, f)
+		}
+	}
+	_, _ = runLocked(repoPath, "rebase", "--abort")
+	return conflictFiles, fmt.Errorf("rebase conflict")
 }
 
 // --- git LFS ---

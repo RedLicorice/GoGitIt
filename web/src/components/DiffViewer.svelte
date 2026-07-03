@@ -1,12 +1,31 @@
 <script>
+  import { createEventDispatcher } from 'svelte';
   import { api } from '../lib/api.js';
   import { diffMode, repos, selectedRepo, selectedRepoId } from '../lib/stores.js';
   import { addToast } from '../lib/toasts.js';
   import ShaPill from './ShaPill.svelte';
 
+  const dispatch = createEventDispatcher();
+
   // A FileDiff: { path, status, binary, additions, deletions, hunks: [...],
   //   is_submodule?, submodule_old?, submodule_new?, submodule_log? }.
   export let file;
+  // Repo + optional commit hash for resolving raw image previews. `commit`
+  // unset → worktree; set → blob at that commit's tree.
+  export let repoId = null;
+  export let commit = null;
+
+  const IMG_EXTS = new Set([
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'ico', 'bmp',
+  ]);
+  function imageExt(p) {
+    const dot = (p || '').lastIndexOf('.');
+    if (dot < 0) return '';
+    return p.slice(dot + 1).toLowerCase();
+  }
+  $: isImage = file && file.binary && IMG_EXTS.has(imageExt(file.path));
+  $: imageUrl =
+    isImage && repoId ? api.rawUrl(repoId, file.path, commit || undefined) : null;
 
   // Registered submodule repo (if any) matching this entry. Drives the
   // "Open in GoGitIt" affordance.
@@ -29,6 +48,7 @@
         kind: 'success',
         message: `Updated submodule ${file.path} — committed and pushed to ${res.remote}`,
       });
+      dispatch('committed', { path: file.path });
     } catch (e) {
       addToast({ kind: 'error', message: e.message, timeout: 9000 });
     } finally {
@@ -86,7 +106,17 @@
 
 {#if file}
   {#if file.binary}
-    <div class="px-3 py-3 text-sm text-fg-muted italic">Binary file — diff not shown.</div>
+    {#if imageUrl}
+      <div class="p-3 md:p-6 flex justify-center bg-canvas-subtle">
+        <img
+          src={imageUrl}
+          alt={file.path}
+          class="max-w-full max-h-[70vh] object-contain rounded border border-border bg-canvas"
+        />
+      </div>
+    {:else}
+      <div class="px-3 py-3 text-sm text-fg-muted italic">Binary file — diff not shown.</div>
+    {/if}
   {:else if file.is_submodule}
     <!-- Submodule (gitlink) entry — show the SHAs and a log of commits the
          submodule moved through; offer to open the submodule (if registered)

@@ -391,7 +391,7 @@
                     </button>
                     {#if expanded[fd.path]}
                       <div class="border-t border-border">
-                        <DiffViewer file={fd} />
+                        <DiffViewer file={fd} repoId={repo.id} commit={loadedHash} />
                       </div>
                     {/if}
                   </li>

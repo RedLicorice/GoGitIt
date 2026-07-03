@@ -77,10 +77,28 @@
     if (s.out_of_sync) return { text: 'out of sync', class: 'text-attention' };
     return { text: 'in sync', class: 'text-success' };
   }
+
+  // Same portal+fixed trick BranchMenu uses — the tab bar clips absolute kids.
+  let triggerEl;
+  let popTop = 0;
+  let popRight = 0;
+  function positionPopover() {
+    if (!triggerEl) return;
+    const r = triggerEl.getBoundingClientRect();
+    popTop = r.bottom + 4;
+    popRight = window.innerWidth - r.right;
+  }
+  $: if (open) positionPopover();
+
+  function portal(node) {
+    document.body.appendChild(node);
+    return { destroy() { node.parentNode && node.parentNode.removeChild(node); } };
+  }
 </script>
 
-<div class="relative">
+<div>
   <button
+    bind:this={triggerEl}
     class="inline-flex items-center gap-1 text-xs text-accent px-1.5 py-0.5 rounded
            border border-border bg-canvas-inset hover:border-accent transition-colors"
     title="Submodules"
@@ -94,15 +112,17 @@
   </button>
 
   {#if open}
-    <button
-      class="fixed inset-0 z-40 cursor-default"
-      aria-label="Close submodule menu"
-      on:click={() => (open = false)}
-    ></button>
-    <div
-      class="absolute right-0 mt-1 w-80 z-50 rounded-md border border-border
-             bg-canvas-subtle shadow-2xl overflow-hidden"
-    >
+    <div use:portal>
+      <button
+        class="fixed inset-0 z-40 cursor-default"
+        aria-label="Close submodule menu"
+        on:click={() => (open = false)}
+      ></button>
+      <div
+        class="fixed w-80 z-50 rounded-md border border-border
+               bg-canvas-subtle shadow-2xl overflow-hidden"
+        style="top: {popTop}px; right: {popRight}px;"
+      >
       <div class="px-3 py-1.5 border-b border-border text-xs uppercase tracking-wider
                   text-fg-muted font-semibold flex items-center justify-between">
         <span>Submodules</span>
@@ -159,6 +179,7 @@
           title="git submodule update --init --recursive --remote"
           on:click={() => updateAll(true)}
         >Update --remote (pull latest)</button>
+      </div>
       </div>
     </div>
   {/if}

@@ -5,7 +5,7 @@
 
 import { writable, get } from 'svelte/store';
 import { api } from './api.js';
-import { repos } from './stores.js';
+import { repos, divergenceDialog } from './stores.js';
 import { addToast } from './toasts.js';
 import { refreshRepoStatuses } from './repostatus.js';
 
@@ -58,6 +58,12 @@ export async function runSync(repoId, repoName, kind) {
     const call =
       kind === 'fetch' ? api.fetchRemote : kind === 'pull' ? api.pull : api.push;
     const res = await call(repoId);
+
+    if (kind === 'pull' && res && res.diverged) {
+      divergenceDialog.set({ repoId, repoName, ...res });
+      return;
+    }
+
     const st = res.status || {};
 
     if (kind === 'fetch' && (st.behind || 0) > 0) {
@@ -104,6 +110,29 @@ export async function runSync(repoId, repoName, kind) {
       kind: 'error',
       message: `${VERB[kind] || kind} failed — ${repoName}: ${e.message}`,
       timeout: 9000,
+    });
+  } finally {
+    clearSyncing(repoId);
+  }
+}
+
+// runRebasePush resolves a diverged branch: rebase onto upstream + push.
+// Called from DivergeDialog after the user confirms.
+export async function runRebasePush(repoId, repoName) {
+  divergenceDialog.set(null);
+  setSyncing(repoId, 'pull');
+  try {
+    await api.rebasePush(repoId);
+    addToast({ kind: 'success', message: `Rebased and pushed ${repoName}` });
+    setResult(repoId, null);
+    syncSignal.set({ repoId, kind: 'pull', ts: Date.now() });
+    refreshRepoStatuses();
+  } catch (e) {
+    setResult(repoId, 'error');
+    addToast({
+      kind: 'error',
+      message: `Rebase & Push failed — ${repoName}: ${e.message}`,
+      timeout: 0,
     });
   } finally {
     clearSyncing(repoId);

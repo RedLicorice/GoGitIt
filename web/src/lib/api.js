@@ -72,6 +72,15 @@ export const api = {
   // Structured diff for every file in a commit.
   commitDiff: (id, hash) => request(`/repos/${id}/commit/${hash}/diff`),
 
+  // URL (not fetched) for the raw bytes of a file — used as <img src> for
+  // image previews next to binary diffs. Omit `ref` for the worktree copy;
+  // pass a commit hash to read the blob at that commit's tree.
+  rawUrl: (id, path, ref) => {
+    const qs = new URLSearchParams({ path });
+    if (ref) qs.set('ref', ref);
+    return `/api/v1/repos/${id}/raw?${qs.toString()}`;
+  },
+
   // Index manipulation — each returns the refreshed working-tree status.
   stage: (id, paths) =>
     request(`/repos/${id}/stage`, { method: 'POST', body: JSON.stringify({ paths }) }),
@@ -101,6 +110,8 @@ export const api = {
   fetchRemote: (id) => request(`/repos/${id}/fetch`, { method: 'POST' }),
   pull: (id) => request(`/repos/${id}/pull`, { method: 'POST' }),
   push: (id) => request(`/repos/${id}/push`, { method: 'POST' }),
+  // Divergence resolution: stash → rebase onto upstream → push → pop.
+  rebasePush: (id) => request(`/repos/${id}/rebase-push`, { method: 'POST' }),
 
   // Stash (system git) — stash/pop return { count, status }.
   stashList: (id) => request(`/repos/${id}/stash`),

@@ -3,8 +3,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
+	"mime"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -98,6 +101,7 @@ func NewRouter(cfg *config.Config, authP auth.Provider, registry *repo.Registry,
 		api.Post("/repos/{id}/merge", repoBranchOp(registry, "merge"))
 		api.Get("/repos/{id}/diff", repoDiff(registry))
 		api.Get("/repos/{id}/commit/{hash}/diff", repoCommitDiff(registry))
+		api.Get("/repos/{id}/raw", repoRaw(registry))
 
 		// Index manipulation
 		api.Post("/repos/{id}/stage", repoIndexOp(registry, "stage"))
@@ -111,10 +115,11 @@ func NewRouter(cfg *config.Config, authP auth.Provider, registry *repo.Registry,
 		api.Put("/repos/{id}/remotes/{name}", repoSetRemote(registry))
 		api.Delete("/repos/{id}/remotes/{name}", repoRemoveRemote(registry))
 
-		// Transport — fetch / pull / push
+		// Transport — fetch / pull / push / rebase-push (divergence resolution)
 		api.Post("/repos/{id}/fetch", repoTransport(registry, set, cfg.GH.Enabled, "fetch"))
 		api.Post("/repos/{id}/pull", repoTransport(registry, set, cfg.GH.Enabled, "pull"))
 		api.Post("/repos/{id}/push", repoTransport(registry, set, cfg.GH.Enabled, "push"))
+		api.Post("/repos/{id}/rebase-push", repoRebasePush(registry, set, cfg.GH.Enabled))
 
 		// Stash (system git) + submodule parent update
 		api.Get("/repos/{id}/stash", repoStashList(registry))
@@ -351,6 +356,72 @@ func repoBranches(reg *repo.Registry) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, branches)
+	}
+}
+
+// repoRaw serves the raw bytes of a file from a repo, used to preview binary
+// assets (images) inline next to their diff. With no `ref`, reads the
+// worktree; with `ref=<commit>` reads the blob at that commit's tree. The
+// Content-Type is sniffed from the path extension.
+func repoRaw(reg *repo.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		e, err := reg.Get(chi.URLParam(r, "id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		relPath := r.URL.Query().Get("path")
+		if relPath == "" {
+			http.Error(w, "path required", http.StatusBadRequest)
+			return
+		}
+		clean := filepath.Clean(relPath)
+		if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || clean == "." {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
+		ref := r.URL.Query().Get("ref")
+		var data []byte
+		var rerr error
+		if ref == "" {
+			abs := filepath.Join(e.Path, clean)
+			rootAbs, _ := filepath.Abs(e.Path)
+			tgtAbs, _ := filepath.Abs(abs)
+			if !strings.HasPrefix(tgtAbs, rootAbs+string(os.PathSeparator)) && tgtAbs != rootAbs {
+				http.Error(w, "path escapes repo", http.StatusBadRequest)
+				return
+			}
+			const maxRaw = 25 * 1024 * 1024
+			f, openErr := os.Open(abs)
+			if openErr != nil {
+				http.Error(w, openErr.Error(), http.StatusNotFound)
+				return
+			}
+			defer f.Close()
+			data, rerr = io.ReadAll(io.LimitReader(f, maxRaw+1))
+		} else {
+			repo, openErr := gitops.Open(e.Path)
+			if openErr != nil {
+				http.Error(w, openErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			data, rerr = gitops.BlobAtRef(repo, ref, clean)
+			if rerr != nil {
+				http.Error(w, rerr.Error(), http.StatusNotFound)
+				return
+			}
+		}
+		if rerr != nil {
+			http.Error(w, rerr.Error(), http.StatusInternalServerError)
+			return
+		}
+		ct := mime.TypeByExtension(strings.ToLower(filepath.Ext(clean)))
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(data)
 	}
 }
 
@@ -750,7 +821,22 @@ func repoTransport(reg *repo.Registry, set *settings.Store, ghEnabled bool, kind
 		case "fetch":
 			err = gitops.Fetch(repo, remoteName, auth)
 		case "pull":
-			err = gitops.Pull(repo, remoteName, auth)
+			div, pullErr := gitops.Pull(repo, remoteName, auth)
+			if pullErr != nil {
+				http.Error(w, pullErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if div != nil {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"diverged":       true,
+					"ahead":          div.Ahead,
+					"behind":         div.Behind,
+					"local_commits":  div.LocalCommits,
+					"remote_commits": div.RemoteCommits,
+					"dirty":          div.Dirty,
+				})
+				return
+			}
 		case "push":
 			err = gitops.Push(repo, remoteName, auth)
 		default:
@@ -767,6 +853,53 @@ func repoTransport(reg *repo.Registry, set *settings.Store, ghEnabled bool, kind
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"remote": remoteName, "status": st})
+	}
+}
+
+// repoRebasePush resolves a diverged branch: stash → rebase → push → pop.
+func repoRebasePush(reg *repo.Registry, set *settings.Store, ghEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		e, err := reg.Get(chi.URLParam(r, "id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		repo, err := gitops.Open(e.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		remoteName := gitops.CurrentRemote(repo)
+		rm, err := repo.Remote(remoteName)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("no remote %q configured", remoteName), http.StatusBadRequest)
+			return
+		}
+		urls := rm.Config().URLs
+		if len(urls) == 0 {
+			http.Error(w, "remote has no URL", http.StatusBadRequest)
+			return
+		}
+		ghToken := ""
+		if ghEnabled {
+			ghToken, _ = gh.Token()
+		}
+		auth, err := gitops.ResolveAuth(urls[0], ghToken, set.Get().GitHubPAT)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		remote, err := gitops.RebasePush(repo, remoteName, auth)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		st, err := gitops.GetStatus(repo)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"remote": remote, "status": st})
 	}
 }
 

@@ -606,7 +606,11 @@
         {:else if diffError}
           <p class="px-3 py-4 text-sm text-danger">{diffError}</p>
         {:else if fileDiff}
-          <DiffViewer file={fileDiff} />
+          <DiffViewer
+            file={fileDiff}
+            repoId={repo.id}
+            on:committed={() => { selectedFile = null; fileDiff = null; load(); }}
+          />
         {/if}
       </div>
     {:else}

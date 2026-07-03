@@ -75,8 +75,16 @@ export async function loadMe() {
 
 export async function loadRepos() {
   const list = await api.listRepos();
-  repos.set(list || []);
+  const sorted = (list || []).slice().sort((a, b) =>
+    (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' })
+  );
+  repos.set(sorted);
 }
+
+// Divergence dialog — set when a pull detects that the branch is both ahead
+// and behind its upstream. Shape: { repoId, repoName, ahead, behind,
+// local_commits, remote_commits, dirty } | null
+export const divergenceDialog = writable(null);
 
 // MCP state — driven from app settings. Loaded on app start + after a save.
 export const mcpState = writable(null);

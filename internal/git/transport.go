@@ -52,31 +52,107 @@ func Fetch(repo *gogit.Repository, remoteName string, auth transport.AuthMethod)
 	return nil
 }
 
-// Pull fetches the named remote and fast-forwards the current branch to its
-// upstream. The fetch is go-git (auth-aware, touches no worktree file); the
-// fast-forward runs through system git — go-git's Worktree.Pull is not atomic,
-// on a dirty worktree it moves the branch ref but leaves the index and
-// worktree stale. A non-fast-forward situation errors (no real merge yet).
-func Pull(repo *gogit.Repository, remoteName string, auth transport.AuthMethod) error {
+// DivergenceInfo is returned by Pull when the branch has diverged from its
+// upstream — both ahead and behind. It is not an error; the caller should
+// surface a confirmation dialog offering Rebase & Push as the resolution path.
+type DivergenceInfo struct {
+	Ahead         int
+	Behind        int
+	LocalCommits  []string // git log --oneline upstream..HEAD
+	RemoteCommits []string // git log --oneline HEAD..upstream
+	Dirty         bool     // working tree has uncommitted changes
+}
+
+// Pull fetches and fast-forwards the current branch, or returns a non-nil
+// DivergenceInfo when the branch has diverged (both ahead and behind — not
+// an error). A nil DivergenceInfo + nil error means success.
+func Pull(repo *gogit.Repository, remoteName string, auth transport.AuthMethod) (*DivergenceInfo, error) {
 	head, err := repo.Head()
 	if err != nil {
-		return fmt.Errorf("head: %w", err)
+		return nil, fmt.Errorf("head: %w", err)
 	}
 	if head.Name() == plumbing.HEAD {
-		return fmt.Errorf("cannot pull onto a detached HEAD — check out a branch first")
+		return nil, fmt.Errorf("cannot pull onto a detached HEAD — check out a branch first")
 	}
 	if err := Fetch(repo, remoteName, auth); err != nil {
-		return err
+		return nil, err
 	}
 	branch := head.Name().Short()
 	upstream := remoteName + "/" + branch
 	if _, err := repo.Reference(plumbing.NewRemoteReferenceName(remoteName, branch), true); err != nil {
-		return fmt.Errorf("no upstream %s — nothing to pull", upstream)
+		return nil, fmt.Errorf("no upstream %s — nothing to pull", upstream)
 	}
-	if err := gitext.MergeFF(worktreeRoot(repo), upstream); err != nil {
-		return err
+	root := worktreeRoot(repo)
+	ahead, behind, err := gitext.AheadBehind(root, upstream)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if ahead > 0 && behind > 0 {
+		localCommits, _ := gitext.LogOneline(root, upstream+"..HEAD")
+		remoteCommits, _ := gitext.LogOneline(root, "HEAD.."+upstream)
+		dirty, _ := gitext.IsDirty(root)
+		return &DivergenceInfo{
+			Ahead:         ahead,
+			Behind:        behind,
+			LocalCommits:  localCommits,
+			RemoteCommits: remoteCommits,
+			Dirty:         dirty,
+		}, nil
+	}
+	if behind > 0 {
+		if err := gitext.MergeFF(root, upstream); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+// RebasePush resolves a diverged branch: stashes if dirty, rebases onto the
+// upstream, pushes, then pops the stash. On rebase conflict the rebase is
+// aborted and an error describing the conflicting files is returned.
+func RebasePush(repo *gogit.Repository, remoteName string, auth transport.AuthMethod) (string, error) {
+	head, err := repo.Head()
+	if err != nil {
+		return "", fmt.Errorf("head: %w", err)
+	}
+	branch := head.Name().Short()
+	upstream := remoteName + "/" + branch
+	root := worktreeRoot(repo)
+
+	dirty, err := gitext.IsDirty(root)
+	if err != nil {
+		return "", err
+	}
+	stashed := false
+	if dirty {
+		if err := gitext.Stash(root); err != nil {
+			return "", fmt.Errorf("stash: %w", err)
+		}
+		stashed = true
+	}
+
+	conflictFiles, rebaseErr := gitext.RebaseOnto(root, upstream)
+	if rebaseErr != nil {
+		if stashed {
+			_ = gitext.StashPop(root)
+		}
+		if len(conflictFiles) > 0 {
+			return "", fmt.Errorf("rebase conflict in: %s", strings.Join(conflictFiles, ", "))
+		}
+		return "", fmt.Errorf("rebase failed: %w", rebaseErr)
+	}
+
+	if err := Push(repo, remoteName, auth); err != nil {
+		return "", err
+	}
+
+	if stashed {
+		if err := gitext.StashPop(root); err != nil {
+			return "", fmt.Errorf("push succeeded but stash pop conflicted — resolve manually with 'git stash pop': %w", err)
+		}
+	}
+
+	return remoteName, nil
 }
 
 // Push sends the current branch to the named remote and advances the local

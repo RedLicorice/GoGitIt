@@ -19,6 +19,26 @@
   let confirmState = null; // { kind: 'delete' | 'merge', name }
   let switchState = null; // target branch awaiting a dirty-switch choice
 
+  // Popover anchored to the trigger via fixed coords so it escapes any
+  // overflow-clipped ancestor (the tab bar has overflow-x-auto).
+  let triggerEl;
+  let popTop = 0;
+  let popRight = 0;
+  function positionPopover() {
+    if (!triggerEl) return;
+    const r = triggerEl.getBoundingClientRect();
+    popTop = r.bottom + 4;
+    popRight = window.innerWidth - r.right;
+  }
+  $: if (open) positionPopover();
+
+  // Append a node to document.body for the duration it's mounted (escapes
+  // ancestor stacking / overflow contexts).
+  function portal(node) {
+    document.body.appendChild(node);
+    return { destroy() { node.parentNode && node.parentNode.removeChild(node); } };
+  }
+
   $: locals = branches.filter((b) => !b.is_remote);
 
   async function op(fn, successMsg) {
@@ -80,8 +100,9 @@
   }
 </script>
 
-<div class="relative">
+<div>
   <button
+    bind:this={triggerEl}
     class="flex items-center gap-1 text-sm font-mono text-fg bg-canvas-inset
            border border-border px-2 py-0.5 rounded hover:border-accent transition-colors
            {diverged ? 'border-l-4 border-l-attention' : ''}"
@@ -93,15 +114,17 @@
   </button>
 
   {#if open}
-    <button
-      class="fixed inset-0 z-40 cursor-default"
-      aria-label="Close branch menu"
-      on:click={() => (open = false)}
-    ></button>
-    <div
-      class="absolute right-0 mt-1 w-64 z-50 rounded-md border border-border
-             bg-canvas-subtle shadow-2xl overflow-hidden"
-    >
+    <div use:portal>
+      <button
+        class="fixed inset-0 z-40 cursor-default"
+        aria-label="Close branch menu"
+        on:click={() => (open = false)}
+      ></button>
+      <div
+        class="fixed w-64 z-50 rounded-md border border-border
+               bg-canvas-subtle shadow-2xl overflow-hidden"
+        style="top: {popTop}px; right: {popRight}px;"
+      >
       <div class="px-3 py-1.5 border-b border-border text-xs uppercase tracking-wider
                   text-fg-muted font-semibold">
         Branches
@@ -144,6 +167,7 @@
           disabled={working || !newName.trim()}
           on:click={create}
         >Create</button>
+      </div>
       </div>
     </div>
   {/if}

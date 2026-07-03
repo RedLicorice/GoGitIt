@@ -9,6 +9,7 @@
   import EmptyState from './components/EmptyState.svelte';
   import SettingsModal from './components/SettingsModal.svelte';
   import ToastContainer from './components/ToastContainer.svelte';
+  import DivergeDialog from './components/DivergeDialog.svelte';
 
   let loading = true;
   let error = null;
@@ -55,5 +56,6 @@
   {/if}
 
   <SettingsModal />
+  <DivergeDialog />
   <ToastContainer />
 </div>

@@ -3,6 +3,7 @@ package git
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -55,6 +56,30 @@ type Branch struct {
 // Open opens an existing repository at path.
 func Open(path string) (*gogit.Repository, error) {
 	return gogit.PlainOpen(path)
+}
+
+// BlobAtRef returns the bytes of relPath as it appears at the given commit ref.
+// Caps at 25 MB — this is for preview rendering, not export.
+func BlobAtRef(repo *gogit.Repository, ref, relPath string) ([]byte, error) {
+	commit, err := repo.CommitObject(plumbing.NewHash(ref))
+	if err != nil {
+		return nil, fmt.Errorf("commit %s: %w", ref, err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("tree: %w", err)
+	}
+	f, err := tree.File(relPath)
+	if err != nil {
+		return nil, err
+	}
+	r, err := f.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	const maxBlob = 25 * 1024 * 1024
+	return io.ReadAll(io.LimitReader(r, maxBlob+1))
 }
 
 // GetStatus returns a structured snapshot of the working tree. The file lists
