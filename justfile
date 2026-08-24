@@ -22,11 +22,13 @@ dev-backend:
 dev-frontend:
     cd web && npm run dev
 
-# Print the two dev commands to run in separate terminals
+# Run backend + frontend in one terminal (multitail merges both streams;
+# backend is the noisy one, vite's few lines slot in). Quit with 'q'.
+# ponytail: multitail SIGTERMs the shells on quit; a stray `go run` child can
+# outlive it — `pkill -f 'go run ./cmd/gogitit'` if a port stays held.
 dev:
-    @echo "Run in two terminals:"
-    @echo "  just dev-backend"
-    @echo "  just dev-frontend"
+    multitail -cT ANSI -l "GOGITIT_AUTH_ENABLED=false go run ./cmd/gogitit" \
+              -cT ANSI -L "cd web && npm run dev"
 
 # Build Svelte SPA into web/dist
 build-frontend:

@@ -1,7 +1,13 @@
 # GoGitIt
 
-A headless Git client with a GitHub Desktop–inspired UI. Runs locally as a
-single-user binary, or on a server with Keycloak OIDC authentication.
+*Go and get it* — for code. A self-hosted Git client with a GitHub
+Desktop–inspired UI: run it on the machine your repos live on, reach the UI
+from anywhere on your tailnet. Built because mobile Git clients are miserable
+and phones should still be able to do real work.
+
+- Runs as a single binary, no database.
+- Local mode: no auth, single user. Server mode: Keycloak OIDC.
+- Responsive UI — the point is that it is usable on a phone.
 
 > Like `ungit`, but with a familiar GitHub aesthetic and a Go backend.
 
@@ -146,4 +152,4 @@ Coming next:
 
 ## License
 
-TBD
+Apache-2.0 — see [LICENSE](LICENSE).
